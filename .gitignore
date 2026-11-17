@@ -1,0 +1,6 @@
+build/
+build-*/
+*.wav
+*.s16
+gmon.out
+compile_commands.json
