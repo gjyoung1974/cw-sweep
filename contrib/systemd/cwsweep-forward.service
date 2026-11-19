@@ -1,0 +1,25 @@
+# Relays spots from cwsweep's telnet server to a DX cluster / HTTP / file.
+# Works as a system service, or copy into ~/.config/systemd/user/ for a user
+# service (then change EnvironmentFile to %h/.config/cwsweep/cwsweep-forward.env
+# and remove User=/Group=). Install: see docs/daemon.md
+[Unit]
+Description=Forward cwsweep spots to a DX cluster / HTTP endpoint
+Wants=network-online.target
+After=network-online.target cwsweep.service
+
+[Service]
+Type=simple
+EnvironmentFile=/etc/default/cwsweep-forward
+ExecStart=/usr/local/bin/cwsweep-forward $FORWARD_ARGS
+Restart=always
+RestartSec=10
+User=cwsweep
+Group=cwsweep
+StateDirectory=cwsweep
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

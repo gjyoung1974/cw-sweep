@@ -1,0 +1,15 @@
+# cwsweep as a systemd *user* service: needed for sound-card input, because
+# PulseAudio/PipeWire run per user. Install: see docs/daemon.md
+[Unit]
+Description=cwsweep multi-channel CW decoder and spotter
+After=pipewire-pulse.service pulseaudio.service
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/cwsweep/cwsweep.env
+ExecStart=/usr/local/bin/cwsweep --no-color $CWSWEEP_ARGS
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
