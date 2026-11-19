@@ -111,6 +111,8 @@ class Engine {
   int binOfOffset(double hz) const;
   double interpolatedOffset(int a) const;
   double signalLevel(int a, int64_t window) const;
+  void findPassband();
+  bool isHarmonicImage(int a) const;
   double channelSignal(const Channel& ch, int64_t from, int64_t to) const;
   // Channel filter: coherent sum of K consecutive phase-aligned STFT frames
   // of the channel's bin (Hann window convolved with a K-frame boxcar).
@@ -150,7 +152,8 @@ class Engine {
   std::vector<int> bins_;          // active FFT bin per active index (ascending frequency)
   std::vector<float> ring_;        // power per bin per frame
   std::vector<cfloat> cring_;      // complex spectrum per bin per frame
-  std::vector<double> noise_, noiseRaw_, peak_, snr_;
+  std::vector<double> noise_, noiseRaw_, noiseLocal_, peak_, snr_;
+  int bandLo_ = 0, bandHi_ = 0;    // active-bin range inside the receiver's passband
   std::vector<int> candCount_;
   std::vector<float> detectBuf_;
   std::vector<std::unique_ptr<Channel>> channels_;

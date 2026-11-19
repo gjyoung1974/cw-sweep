@@ -29,6 +29,8 @@ struct Options {
   double wpmMin = 18, wpmMax = 32;
   double jitter = 0.0;
   double weight = 0.0;
+  double charGap = 3.0;      // letter gap in dits (standard 3)
+  double wordGap = 7.0;      // word gap in dits (standard 7)
   double qsb = 0.0;          // depth 0..1 (rate 0.3 Hz)
   double qrn = 0.0;          // impulses / s
   int interferers = 0;
@@ -97,9 +99,13 @@ TrialResult runTrial(const Options& o, double snr, uint64_t seed) {
   t.start = 1.0 + U(rng);
   t.fist.jitter = o.jitter;
   t.fist.weight = o.weight;
+  t.fist.charGap = o.charGap;
+  t.fist.wordGap = o.wordGap;
   if (o.qsb > 0) { t.qsbRate = 0.3; t.qsbDepth = o.qsb; }
   st.push_back(t);
-  double dur = t.start + cw::messageDuration(t.text, t.wpm) + 2.5;
+  // messageDuration assumes standard spacing; wide gaps stretch the message.
+  double stretch = std::max({1.0, o.charGap / 3.0, o.wordGap / 7.0});
+  double dur = t.start + stretch * cw::messageDuration(t.text, t.wpm) + 2.5;
 
   for (int i = 0; i < o.interferers; ++i) {
     cw::Station s;
@@ -195,6 +201,8 @@ void usage() {
                "  --wpm MIN:MAX         speed range (18:32)\n"
                "  --jitter X            hand-sent timing jitter, relative std-dev (0)\n"
                "  --weight X            keying weight in dits (0)\n"
+               "  --char-gap D          letter gap in dits (3); wide spacing / Farnsworth\n"
+               "  --word-gap D          word gap in dits (7)\n"
                "  --qsb DEPTH           Rayleigh fading depth 0..1 (0)\n"
                "  --qrn RATE            impulse noise per second (0)\n"
                "  --no-nb               disable the impulse noise blanker\n"
@@ -238,6 +246,8 @@ int main(int argc, char** argv) {
     else if (a == "--wpm") std::sscanf(next().c_str(), "%lf:%lf", &o.wpmMin, &o.wpmMax);
     else if (a == "--jitter") o.jitter = std::stod(next());
     else if (a == "--weight") o.weight = std::stod(next());
+    else if (a == "--char-gap") o.charGap = std::stod(next());
+    else if (a == "--word-gap") o.wordGap = std::stod(next());
     else if (a == "--qsb") o.qsb = std::stod(next());
     else if (a == "--qrn") o.qrn = std::stod(next());
     else if (a == "--no-nb") o.nb = false;

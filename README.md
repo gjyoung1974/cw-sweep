@@ -38,6 +38,14 @@ samples ─► impulse noise blanker ─► STFT channelizer (50 Hz resolution, 
   local peak whose 85th percentile is above threshold on two consecutive
   passes. The last 2 seconds are replayed into a new channel, so the start of
   a transmission isn't lost.
+* **Receiver passband.** The noise floor is only estimated, and stations are
+  only looked for, inside the receiver's passband: the contiguous stretch of
+  bins carrying band noise. With a narrow CW filter in front of a sound card
+  most of the 200–3500 Hz range holds no noise at all, which would otherwise
+  put the floor far too low for the signals inside the filter.
+* **Harmonic images.** For audio input, a candidate at 2–5 times the pitch of
+  a much stronger signal that keys in step with it is taken to be a harmonic
+  from an overdriven audio stage, and is not decoded or spotted.
 * **Matched filter.** Once a channel's speed is known, its filter becomes a
   coherent sum of K phase-aligned STFT frames. That gives a Hann window
   convolved with a boxcar, sized to the shortest element (dit or gap,
@@ -50,7 +58,12 @@ samples ─► impulse noise blanker ─► STFT channelizer (50 Hz resolution, 
   Fade levels that can't be told apart from noise are excluded.
 * **Timing model.** Dit length, keying weight and the sender's timing spread
   are fitted continuously to recent element durations by a robust grid
-  search, with class priors and hysteresis.
+  search, with class priors and hysteresis. Letter and word gaps are fitted
+  per station as well: operators who leave long gaps between letters
+  (deliberate hand sending, Farnsworth-style practice transmissions) are read
+  as words, not one letter per word. Decoding of a new station starts once
+  its spacing has been seen, about a word in, and replays from its first
+  character.
 * **Soft-decision decoder.** A beam search over hypotheses that each carry the
   key state, the time spent in it, the Morse pattern so far and the text not
   yet committed. When a run ends, its length is scored against the dit/dah or
@@ -196,6 +209,7 @@ At 25 WPM, −8 dB in 2500 Hz is about +13 dB per-dit Eb/N0.
 | random 5-character groups (no language-model help) | 0.8% | 0.0% | 0.0% |
 | hand-sent, 15% timing jitter | 2.8% | 0.4% | 0.5% |
 | heavy keying weight (+0.3 dit) | 1.7% | 0.0% | 0.0% |
+| wide spacing: 5-dit letter gaps, 12-dit word gaps | 3.2% | 0.6% | 0.6% |
 | Rayleigh QSB, 80% depth, 0.3 Hz | 64% | 11% | 0.0% |
 | QRN, 20 impulses/s | 5.7% | 2.8% | 0.4% |
 | 4 strong interfering stations | 1.4% | 0.0% | 2.1% |
@@ -254,9 +268,14 @@ tests/      unit and end-to-end tests
 * Single-threaded. Channels are independent, so spreading them over cores is
   the obvious next step for very wide or very busy bands.
 * No audio output or waterfall: this is a CLI decoder and spotter.
-* Text tuning (thresholds, priors) was done on synthetic signals. Real-band
-  recordings would be the next calibration step: record with `--record` and
-  replay.
+* Text tuning (thresholds, priors) was done mostly on synthetic signals,
+  checked against a few off-air recordings. More real-band recordings would
+  be the next calibration step: record with `--record` and replay.
+* An operator whose letter gaps and word gaps overlap can't be split into
+  words by timing alone; such text comes out with some words run together
+  or some letters set apart.
+* Stretched spacing is modelled, compressed spacing (letters run together) is
+  not.
 * A neural acoustic model (e.g. a small CNN/RNN producing per-frame mark
   probabilities) could replace the analytic LLR and feed the same soft
   decoder.

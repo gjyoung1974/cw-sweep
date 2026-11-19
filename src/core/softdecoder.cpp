@@ -48,7 +48,7 @@ double SoftDecoder::gapLL(double len, int cls) const {
     double s = 0.35 * mu + 0.8;
     return len >= mu ? -std::log(s) : logNorm(len, mu, s);
   }
-  return logNorm(len, mu, timing_.sigma * mu + 0.8);
+  return logNorm(len, mu, timing_.gapSigma(cls) * mu + 0.8);
 }
 
 void SoftDecoder::emitChar(Hyp& h, bool word) const {

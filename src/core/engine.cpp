@@ -35,7 +35,7 @@ struct Engine::Channel {
   CallTracker calls;
   std::vector<KeyEvent> events;
   std::vector<std::pair<int64_t, int>> committed;
-  double lastDit = -1, lastBias = 0, lastSigma = 0;
+  double lastDit = -1, lastBias = 0, lastSigma = 0, lastCharUnits = 0, lastCharSigma = 0;
 
   // Soft decoder: activated once the hard decoder has locked on to the speed;
   // LLRs seen before that are buffered and replayed.
@@ -108,6 +108,8 @@ Engine::Engine(EngineConfig cfg) : cfg_(std::move(cfg)) {
   cring_.assign(nb * kRing, cfloat{});
   noise_.assign(nb, 1.0);
   noiseRaw_.assign(nb, 1.0);
+  noiseLocal_.assign(nb, 1.0);
+  bandHi_ = static_cast<int>(nb) - 1;
   peak_.assign(nb, 1.0);
   snr_.assign(nb, 0.0);
   candCount_.assign(nb, 0);
@@ -282,7 +284,14 @@ void Engine::runChannel(Channel& ch, double power) {
   }
   if (!ch.events.empty()) {
     const Timing& tm = ch.decoder.timing();
-    if (ch.decoder.locked() && (tm.dit != ch.lastDit || tm.bias != ch.lastBias || tm.sigma != ch.lastSigma)) {
+    if (ch.decoder.locked() && (tm.dit != ch.lastDit || tm.bias != ch.lastBias || tm.sigma != ch.lastSigma ||
+                                tm.charUnits != ch.lastCharUnits || tm.charSigma != ch.lastCharSigma)) {
+      if (debugLevel())
+        std::fprintf(stderr, "[ch%d %.0fHz f=%lld] timing dit=%.1f bias=%.1f sigma=%.2f gaps=%.1f/%.1f charSigma=%.2f\n",
+                     ch.id, ch.freqHz, static_cast<long long>(frame_), tm.dit, tm.bias, tm.sigma, tm.charUnits,
+                     tm.wordUnits, tm.charSigma);
+      ch.lastCharUnits = tm.charUnits;
+      ch.lastCharSigma = tm.charSigma;
       ch.lastSigma = tm.sigma;
       ch.lastDit = tm.dit;
       ch.lastBias = tm.bias;
@@ -313,10 +322,12 @@ void Engine::runChannel(Channel& ch, double power) {
       ch.llrHist.erase(ch.llrHist.begin(), ch.llrHist.begin() + 1000);
       ch.llrHistStart += 1000;
     }
-    if (ch.decoder.locked()) {
-      // Speed is known: switch the channel filter to a boxcar matched to the
-      // dit, recompute the buffered history with it and replay it through the
-      // soft decoder.
+    if (ch.decoder.spacingReady()) {
+      // Speed and spacing are known: switch the channel filter to a boxcar
+      // matched to the dit, recompute the buffered history with it and replay
+      // it through the soft decoder. Waiting for the spacing (a word or so)
+      // means a station with wide letter gaps reads correctly from its first
+      // character instead of one letter per word until the fit catches up.
       ch.softActive = true;
       const Timing& tm = ch.decoder.timing();
       setFilter(ch, ch.freqHz, matchedK(std::min(tm.markMean(0), tm.gapMean(0))));
@@ -437,12 +448,21 @@ void Engine::detect() {
     peak_[a] = v[i85];
     noiseRaw_[a] = p20 / 0.2231;  // exponential distribution: p20 = 0.2231 * mean
   }
-  // Local median across frequency: robust to the signals themselves.
+  // Local median across frequency: robust to the signals themselves. Only
+  // bins inside the receiver's passband take part: beyond the filter edges
+  // there is no antenna noise, and counting those bins would put the floor
+  // far too low for everything near (or, with a narrow CW filter, inside) it.
+  findPassband();
   const int kHalf = 16 * os_;
   std::vector<double> w;
   for (int a = 0; a < nb; ++a) {
     w.clear();
-    for (int b = std::max(0, a - kHalf); b <= std::min(nb - 1, a + kHalf); b += 2) w.push_back(noiseRaw_[b]);
+    int lo = std::max(0, a - kHalf), hi = std::min(nb - 1, a + kHalf);
+    if (a >= bandLo_ && a <= bandHi_) {
+      lo = std::max(lo, bandLo_);
+      hi = std::min(hi, bandHi_);
+    }
+    for (int b = lo; b <= hi; b += 2) w.push_back(noiseRaw_[b]);
     std::nth_element(w.begin(), w.begin() + static_cast<long>(w.size() / 2), w.end());
     // A keyed signal's 20th percentile already sits in its gaps, so the local
     // median is robust even in a crowded band; only steady carriers are outliers.
@@ -490,7 +510,8 @@ void Engine::detect() {
   if (frame_ < kWindow / 2) return;
   const int span = 2 * os_;  // +-1 resolution width
   for (int a = 0; a < nb; ++a) {
-    bool cand = a >= span && a < nb - span && snr_[a] >= thr && noiseRaw_[a] <= 3.0 * noise_[a];
+    bool cand = a >= span && a < nb - span && a >= bandLo_ && a <= bandHi_ && snr_[a] >= thr &&
+                noiseRaw_[a] <= 3.0 * noise_[a];
     for (int d = 1; cand && d <= span; ++d)
       cand = peak_[a] >= peak_[a - d] && peak_[a] >= peak_[a + d];
     candCount_[a] = cand ? candCount_[a] + 1 : 0;
@@ -514,6 +535,7 @@ void Engine::detect() {
       }
     }
     if (blocked) continue;
+    if (isHarmonicImage(a)) continue;
     // Settle on the bin with the strongest robust signal estimate.
     int best = a;
     double bestLvl = signalLevel(a, kWindow);
@@ -529,6 +551,72 @@ void Engine::detect() {
     }
     createChannel(best);
   }
+}
+
+void Engine::findPassband() {
+  // The receiver's passband is the one contiguous stretch of bins carrying
+  // band noise. Smooth the per-bin floor with a narrow median (carriers and
+  // keyed signals are narrower than it), take the strongest smoothed level as
+  // the in-band reference, and place the edges at the outermost bins within
+  // kEdgeDb of it. A radio's filter stopband, or the region beyond an SDR's
+  // decimation filter, is far below that; ordinary passband ripple, roll-off
+  // and the gaps between strong signals are not.
+  constexpr double kEdge = 3e-4;  // -35 dB
+  const int nb = static_cast<int>(bins_.size());
+  const int half = 3 * os_;
+  double ref = 0;
+  double v[32];
+  for (int a = 0; a < nb; ++a) {
+    int n = 0;
+    for (int b = std::max(0, a - half); b <= std::min(nb - 1, a + half) && n < 32; ++b) v[n++] = noiseRaw_[b];
+    std::nth_element(v, v + n / 2, v + n);
+    noiseLocal_[a] = v[n / 2];
+    ref = std::max(ref, noiseLocal_[a]);
+  }
+  int lo = 0, hi = nb - 1;
+  if (ref > 0) {
+    while (lo < hi && noiseLocal_[lo] < kEdge * ref) ++lo;
+    while (hi > lo && noiseLocal_[hi] < kEdge * ref) --hi;
+  }
+  bandLo_ = lo;
+  bandHi_ = hi;
+}
+
+bool Engine::isHarmonicImage(int a) const {
+  // Audio input only: an overdriven sound card or receiver audio stage adds
+  // harmonics of every strong signal. They key exactly like the fundamental,
+  // so they decode (and would be spotted) at 2x, 3x ... its pitch. A candidate
+  // is such an image when a much stronger signal sits at an integer fraction
+  // of its frequency and the two rise and fall together.
+  if (cfg_.iq) return false;
+  const double f = offsetOfBin(bins_[a]);
+  const double binW = cfg_.sampleRate / nfft_;
+  const int64_t avail = std::min<int64_t>(frame_ + 1, kWindow);
+  for (int n = 2; n <= 5; ++n) {
+    const double f0 = f / n;
+    if (f0 < offsetOfBin(bins_.front()) - binW) break;
+    int b = binOfOffset(f0);
+    // The candidate bin fixes f only to within a bin, so the fundamental is
+    // within a fraction of a bin of f/n: take the strongest of the neighbours.
+    for (int d = -1; d <= 1; ++d) {
+      int c = binOfOffset(f0) + d;
+      if (c >= 0 && c < static_cast<int>(bins_.size()) && peak_[c] > peak_[b]) b = c;
+    }
+    if (std::fabs(offsetOfBin(bins_[b]) - f0) > 1.5 * binW) continue;
+    if (peak_[b] < 10.0 * peak_[a]) continue;
+    // Correlation of the two power histories (log domain, so that it measures
+    // the keying pattern and not the level).
+    double sa = 0, sb = 0, saa = 0, sbb = 0, sab = 0;
+    const double fa = noise_[a], fb = noise_[b];
+    for (int64_t t = frame_ - avail + 1; t <= frame_; ++t) {
+      double x = std::log(ring(a, t) + fa), y = std::log(ring(b, t) + fb);
+      sa += x; sb += y; saa += x * x; sbb += y * y; sab += x * y;
+    }
+    const double m = static_cast<double>(avail);
+    double cov = sab - sa * sb / m, va = saa - sa * sa / m, vb = sbb - sb * sb / m;
+    if (va > 0 && vb > 0 && cov / std::sqrt(va * vb) > 0.6) return true;
+  }
+  return false;
 }
 
 double Engine::interpolatedOffset(int a) const {

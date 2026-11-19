@@ -217,6 +217,74 @@ void testNoiseOnlyNoSpots() {
   CHECK(spots.empty());
 }
 
+void testWideSpacing() {
+  // Letter gaps of 5 dits and word gaps of 13 (slow hand sending, Farnsworth
+  // practice): must read as words from the first character, not one letter
+  // per word.
+  auto s = station(700, 22, 10, "CQ CQ DE K1ABC K1ABC K");
+  s.fist.charGap = 5;
+  s.fist.wordGap = 13;
+  cw::SynthParams sp;
+  sp.duration = 2.0 * cw::messageDuration(s.text, s.wpm) + 4.0;
+  sp.seed = 8;
+  std::vector<std::string> spots;
+  CHECK_EQ(decodeBand({s}, sp, &spots)[0], std::string("CQ CQ DE K1ABC K1ABC K"));
+  CHECK(spots.size() == 1 && spots[0] == "K1ABC");
+}
+
+void testNarrowFilterOverdrive() {
+  // A receiver with a 400 Hz CW filter feeding an overdriven sound card: band
+  // noise exists only inside the filter, and clipping puts harmonics of the
+  // station (700 Hz) at 2100 and 3500 Hz, where there is no noise at all. The
+  // station must be found at 700 Hz, and its harmonics must not be decoded
+  // or spotted.
+  const std::string msg = "CQ CQ DE K1ABC K1ABC K";
+  cw::SynthParams sp;
+  sp.duration = cw::messageDuration(msg, 25) + 3.0;
+  sp.seed = 9;
+  auto x = cw::synthesize({station(700, 25, 25, msg)}, sp);
+
+  // Windowed-sinc band-pass, 500-900 Hz.
+  const int taps = 401;
+  const double fs = sp.sampleRate, f1 = 500 / fs, f2 = 900 / fs;
+  std::vector<double> h(taps);
+  for (int i = 0; i < taps; ++i) {
+    double n = i - (taps - 1) / 2.0;
+    double v = n == 0 ? 2 * (f2 - f1) : (std::sin(2 * M_PI * f2 * n) - std::sin(2 * M_PI * f1 * n)) / (M_PI * n);
+    h[i] = v * (0.54 - 0.46 * std::cos(2 * M_PI * i / (taps - 1)));
+  }
+  std::vector<double> y(x.size(), 0.0);
+  double power = 0;
+  for (size_t i = 0; i < x.size(); ++i) {
+    double acc = 0;
+    for (int k = 0; k < taps && static_cast<size_t>(k) <= i; ++k) acc += h[k] * x[i - k].real();
+    y[i] = acc;
+    power += acc * acc;
+  }
+  // Hard clip well below the key-down amplitude, then a faint sound-card floor.
+  const double clip = 1.2 * std::sqrt(power / y.size());
+  std::vector<float> out(y.size());
+  uint32_t lcg = 12345;
+  for (size_t i = 0; i < y.size(); ++i) {
+    lcg = lcg * 1664525u + 1013904223u;
+    double floor = (static_cast<double>(lcg >> 8) / (1 << 24) - 0.5) * 2e-3 * clip;
+    out[i] = static_cast<float>(std::clamp(y[i], -clip, clip) + floor);
+  }
+
+  cw::Engine eng(cw::EngineConfig{});
+  std::string text, elsewhere;
+  std::vector<std::string> spots;
+  eng.onText = [&](const cw::ChannelInfo& ci, const std::string& t) {
+    (std::abs(ci.offsetHz - 700) < 40 ? text : elsewhere) += t;
+  };
+  eng.onSpot = [&](const cw::Spot& s) { spots.push_back(s.call); };
+  eng.processReal(out.data(), out.size());
+  eng.finish();
+  CHECK_EQ(trim(text), msg);
+  CHECK_EQ(trim(elsewhere), std::string());
+  CHECK(spots.size() == 1 && spots[0] == "K1ABC");
+}
+
 }  // namespace
 
 int main() {
@@ -230,6 +298,8 @@ int main() {
       {"impulse_noise", testImpulseNoise},
       {"fading", testFading},
       {"noise_no_spots", testNoiseOnlyNoSpots},
+      {"wide_spacing", testWideSpacing},
+      {"narrow_overdrive", testNarrowFilterOverdrive},
   };
   for (auto& t : tests) {
     int before = failures;
