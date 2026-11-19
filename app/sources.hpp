@@ -18,7 +18,8 @@ struct SourceOptions {
   bool swapIq = false;
   std::string format = "s16";  // raw: s16 | f32 | u8
   double freq = 0;           // soapy tuning frequency
-  double gain = -1;          // soapy gain dB (<0: automatic)
+  double gain = 0;           // soapy / hpsdr gain, dB
+  bool gainSet = false;      // otherwise: soapy automatic, hpsdr its default
 };
 
 class Source {
@@ -30,6 +31,10 @@ class Source {
   // Read up to `max` samples into `out` (resized). Returns false at end/error.
   virtual bool read(std::vector<cfloat>& out, size_t max) = 0;
   virtual std::string describe() const = 0;
+  // The radio behind this source is transmitting (what it receives is our own signal).
+  virtual bool transmitting() const { return false; }
+  // Problems since the last call (lost packets, ADC overload); empty if none.
+  virtual std::string health() { return {}; }
 };
 
 std::unique_ptr<Source> openSource(const SourceOptions& o, std::string& err);

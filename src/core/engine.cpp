@@ -247,7 +247,7 @@ void Engine::frame(const float* power, const cfloat* spec) {
   for (auto& ch : channels_)
     if (!ch->line.empty() && frame_ - ch->lastTextFrame > idleFrames) emitLine(*ch);
 
-  if (frame_ >= kWindow / 4 && frame_ % kDetectEvery == 0) detect();
+  if (age() > kWindow / 4 && frame_ % kDetectEvery == 0) detect();
 }
 
 void Engine::runChannel(Channel& ch, double power) {
@@ -368,6 +368,7 @@ void Engine::handleText(Channel& ch, const std::string& text) {
   std::vector<CallEvent> calls;
   ch.calls.feed(text, streamTime(), calls);
   for (const CallEvent& ce : calls) {
+    if (isOwnCall(ce.call)) continue;  // our own transmitter, heard by the receiver
     double rf = ci.rfHz;
     double now = streamTime();
     auto it = lastSpot_.find(ce.call);
@@ -428,7 +429,7 @@ void Engine::detect() {
   // CW signal (=> noise), the 85th in its key-down (=> signal + noise).
   // Every 4th frame is enough (neighbouring frames overlap by 75%); gather
   // frame by frame so that the history is read sequentially.
-  const int64_t avail = std::min<int64_t>(frame_ + 1, kWindow);
+  const int64_t avail = std::min<int64_t>(age(), kWindow);
   constexpr int kStride = 4;
   const size_t ns = static_cast<size_t>((avail + kStride - 1) / kStride);
   detectBuf_.resize(ns * static_cast<size_t>(nb));
@@ -507,7 +508,7 @@ void Engine::detect() {
 
   // New signals: local maxima above threshold that look keyed (quiet >20% of
   // the time), seen on two consecutive passes.
-  if (frame_ < kWindow / 2) return;
+  if (age() <= kWindow / 2) return;
   const int span = 2 * os_;  // +-1 resolution width
   for (int a = 0; a < nb; ++a) {
     bool cand = a >= span && a < nb - span && a >= bandLo_ && a <= bandHi_ && snr_[a] >= thr &&
@@ -591,7 +592,7 @@ bool Engine::isHarmonicImage(int a) const {
   if (cfg_.iq) return false;
   const double f = offsetOfBin(bins_[a]);
   const double binW = cfg_.sampleRate / nfft_;
-  const int64_t avail = std::min<int64_t>(frame_ + 1, kWindow);
+  const int64_t avail = std::min<int64_t>(age(), kWindow);
   for (int n = 2; n <= 5; ++n) {
     const double f0 = f / n;
     if (f0 < offsetOfBin(bins_.front()) - binW) break;
@@ -632,7 +633,7 @@ double Engine::interpolatedOffset(int a) const {
 
 double Engine::signalLevel(int a, int64_t window) const {
   // Same two-cluster estimate as channelSignal, on an FFT bin's history.
-  const int64_t avail = std::min<int64_t>(frame_ + 1, window);
+  const int64_t avail = std::min<int64_t>(age(), window);
   const double n = noise_[a];
   double sig = std::max(peak_[a] - n, n);
   for (int it = 0; it < 6; ++it) {
@@ -660,7 +661,7 @@ void Engine::createChannel(int a) {
   ch.lastTextFrame = frame_;
 
   // Replay buffered history so the first words of the transmission are kept.
-  int64_t replay = std::min<int64_t>(frame_ + 1, kWindow);
+  int64_t replay = std::min<int64_t>(age(), kWindow);
   ch.keyerBase = frame_ - replay + 1;
   ch.llrHistStart = ch.keyerBase;
   recomputeHistory(ch, ch.keyerBase);
@@ -699,6 +700,30 @@ void Engine::closeChannel(Channel& ch) {
 void Engine::finish() {
   for (auto& ch : channels_) closeChannel(*ch);
   channels_.clear();
+}
+
+void Engine::retune(double centerHz, bool lsb) {
+  finish();
+  cfg_.centerHz = centerHz;
+  cfg_.lsb = lsb;
+  // Everything in the history belongs to the old frequency.
+  epoch_ = frame_ + 1;
+  noiseReady_ = false;
+  std::fill(candCount_.begin(), candCount_.end(), 0);
+}
+
+bool Engine::isOwnCall(const std::string& call) const {
+  if (cfg_.ownCall.empty()) return false;
+  // Also matches portable forms: W1/K1ABC, K1ABC/P.
+  size_t start = 0;
+  while (start <= call.size()) {
+    size_t e = call.find('/', start);
+    if (call.compare(start, e == std::string::npos ? std::string::npos : e - start, cfg_.ownCall) == 0)
+      return true;
+    if (e == std::string::npos) break;
+    start = e + 1;
+  }
+  return false;
 }
 
 }  // namespace cw

@@ -31,6 +31,11 @@ samples ─► impulse noise blanker ─► STFT channelizer (50 Hz resolution, 
         ─► callsign extraction ─► spot policy ─► stdout / telnet DX cluster
 ```
 
+With `--rigctl`, a retune or a change of mode flushes every channel and
+discards the signal history, so nothing heard on the old frequency is
+reported on the new one. Samples received while the radio transmits are
+dropped, and decoding restarts from a clean history afterwards.
+
 * **Channelizer and detection.** One FFT covers the whole passband: 7,680
   bins, 25 Hz apart, for a 192 kHz I/Q stream. Each bin's noise floor comes from order
   statistics: the 20th percentile sits in a keyed signal's gaps, and a median
@@ -93,9 +98,13 @@ sudo apt install cmake g++ libfftw3-dev libsndfile1-dev libpulse-dev libsoapysdr
 
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
-ctest --test-dir build            # unit + end-to-end tests
+ctest --test-dir build            # unit + end-to-end tests (about a minute)
 sudo cmake --install build        # optional: cwsweep, cwgen, cwbench -> /usr/local/bin
 ```
+
+The openHPSDR (Hermes Lite 2, Radioberry) source and the `rigctld` follower
+need no extra libraries. Their tests run against stand-ins on the loopback
+interface and need Python 3; without it they are skipped.
 
 Options: `-DCWSWEEP_PULSE=OFF`, `-DCWSWEEP_SOAPY=OFF`, `-DCWSWEEP_NATIVE=OFF` (don't use
 `-march=native`, for portable binaries).
@@ -112,6 +121,7 @@ cwsweep [options] SOURCE
 | `-` or `raw:PATH` | raw samples from stdin, a file or a FIFO (`--rate`, `--format s16\|f32\|u8`) |
 | `pulse[:DEVICE]` | PulseAudio/PipeWire capture: the radio's audio via a USB sound card or virtual cable |
 | `soapy[:ARGS]` | SoapySDR device (RTL-SDR, Airspy HF+, SDRplay, HackRF, ...); needs `--freq` |
+| `hpsdr[:ADDRESS]` | Hermes Lite 2, Radioberry or another openHPSDR protocol 1 radio on the network; needs `--band`, `--segment` or `--freq` |
 
 ### Examples
 
@@ -127,6 +137,36 @@ Wideband I/Q from a SoftRock-style sound-card SDR (192 kHz stereo):
 ```sh
 cwsweep --iq --rate 192k --freq 7.05M pulse:alsa_input.pci-0000_00_1f.3.analog-stereo
 ```
+
+Hermes Lite 2 or Radioberry, with cwsweep as the only program using the
+radio. The radio is found on the network, tuned to the middle of the CW
+segment and run at the lowest sample rate that covers it:
+
+```sh
+cwsweep --discover                              # which radios are out there?
+cwsweep --band 40m --call N0CALL --telnet 7300 hpsdr
+cwsweep --segment 14000k-14100k --gain 14 hpsdr:192.168.1.50
+```
+
+Only one program can use such a radio at a time, so this is for a dedicated
+skimmer receiver; cwsweep refuses a radio that is already streaming to
+another program. It only receives: it never sets the transmit bit, and keeps
+the drive level at zero and the power amplifier off. `--gain` is the LNA gain,
+−12 to +48 dB (default 20); lower it if cwsweep reports ADC overload.
+
+Alongside your own operating, on the radio's audio: follow the dial through
+Hamlib's `rigctld`, so spots stay on frequency as you tune and decoding
+pauses while you transmit:
+
+```sh
+rigctld -m <model> -r <port> &                  # or your SDR program's rigctl server
+cwsweep --rigctl localhost --call N0CALL --telnet 7300 pulse
+```
+
+USB and LSB are followed automatically. In CW mode the audio pitch of a
+signal on the dial frequency matters: set `--pitch` to the radio's sidetone
+pitch (600 Hz is assumed). If CW-mode spots land on the wrong side of the
+dial, add `--lsb`, which swaps the sideband sense.
 
 SoapySDR device, decoding about ±90 kHz around 14.06 MHz:
 
@@ -156,14 +196,20 @@ Live channel table instead of scrolling text: `--tui`.
 | Option | |
 |---|---|
 | `--iq`, `--swap-iq` | input is I/Q; swap I and Q |
-| `--rate HZ` | sample rate for raw/pulse/soapy (`k`/`M` suffixes accepted) |
+| `--rate HZ` | sample rate for raw/pulse/soapy/hpsdr (`k`/`M` suffixes accepted) |
+| `--band NAME` | decode the CW part of a band (`160m` ... `6m`); for SDRs also sets the centre frequency |
+| `--segment LO-HI` | decode this frequency range instead, e.g. `7000k-7040k` |
+| `--gain DB` | SoapySDR gain (default automatic); hpsdr LNA gain (default 20) |
+| `--rigctl HOST[:PORT]` | follow frequency and mode through `rigctld`; pause while transmitting |
+| `--pitch HZ` | audio pitch of a signal on the dial frequency, radio in CW mode |
+| `--discover` | list the openHPSDR radios on the network |
 | `--freq F` | dial frequency (audio) or centre frequency (I/Q), e.g. `14025k`, `7.03M` |
 | `--lsb` | audio from a radio in LSB / CW-reverse mode |
 | `--fmin`, `--fmax` | offset range to decode (audio default 200–3500 Hz; I/Q: whole band) |
 | `--threshold DB` | detection threshold, signal/noise in one bin (default 4) |
 | `--no-nb`, `--nb-threshold X` | noise blanker off / threshold (default 8× background) |
 | `--lm W` | language-model weight; 0 disables (default 0.4) |
-| `--call CALL` | your callsign for spots (`CALL-#`, like the RBN) |
+| `--call CALL` | your callsign: names the spotter (`CALL-#`, like the RBN) and is never spotted itself |
 | `--telnet PORT` | DX-cluster telnet server |
 | `--scp FILE` | known-calls list (`MASTER.SCP`) for single-copy spotting |
 | `--respot SEC` | minimum time before re-spotting a call near the same frequency (600) |
@@ -179,8 +225,9 @@ callsign at the login prompt.
 
 [docs/daemon.md](docs/daemon.md) covers:
 
-- running cwsweep under systemd, as a system service (SDR, pipe) or a user
-  service (sound card);
+- running cwsweep under systemd, as a system service (SDR, Hermes Lite 2 /
+  Radioberry, pipe) or a user service (sound card, with `--rigctl` to follow
+  the radio);
 - uploading spots with `cwsweep-forward` to a DX-cluster node, an HTTP
   endpoint or a log file:
 
@@ -256,18 +303,31 @@ src/core/   DSP and decoding library (no I/O)
   callsign    callsign syntax, spot policy, MASTER.SCP
   engine      channel detection and management, glue
   synth       synthetic signal generator
-app/        cwsweep CLI: sources (sndfile/raw/PulseAudio/SoapySDR), telnet server
+app/        cwsweep CLI: sources (sndfile/raw/PulseAudio/SoapySDR/openHPSDR),
+            rigctld follower, telnet server
 contrib/    cwsweep-forward spot relay, systemd units and example settings
 docs/       daemon.md: running as a service, uploading spots
 tools/      cwgen, cwbench
-tests/      unit and end-to-end tests
+tests/      unit and end-to-end tests; stand-in radio and rigctld for testing
+            the hpsdr source and --rigctl without hardware
 ```
 
 ## Limitations and ideas
 
+Planned work is tracked in [TODOs.md](TODOs.md).
+
 * Single-threaded. Channels are independent, so spreading them over cores is
   the obvious next step for very wide or very busy bands.
 * No audio output or waterfall: this is a CLI decoder and spotter.
+* The openHPSDR source has been tested against a protocol emulator
+  (`tests/fake_hpsdr.py`), written from the protocol documents and the Hermes
+  Lite 2 gateware, but not yet on a real radio. If the spectrum comes out
+  mirrored, use `--swap-iq`.
+* One receiver, one band per process. A Hermes Lite 2 can stream several
+  receivers at once; using them for several bands is not implemented.
+* An openHPSDR radio can't be shared with an SDR program (Thetis, SparkSDR,
+  piHPSDR). Running alongside one needs its audio and `--rigctl`; taking I/Q
+  from the program (TCI) is not implemented.
 * Text tuning (thresholds, priors) was done mostly on synthetic signals,
   checked against a few off-air recordings. More real-band recordings would
   be the next calibration step: record with `--record` and replay.

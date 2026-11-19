@@ -48,6 +48,7 @@ struct EngineConfig {
   double respotSec = 600;      // don't re-spot the same call/freq within this
   int lineWidth = 64;
   std::string spotter = "N0CALL-#";
+  std::string ownCall;         // never spotted (upper case; empty: no filter)
   const KnownCalls* knownCalls = nullptr;  // optional MASTER.SCP
 };
 
@@ -81,8 +82,12 @@ class Engine {
 
   void process(const cfloat* x, size_t n);
   void processReal(const float* x, size_t n);
-  // End of stream: flush all decoders.
+  // Flush and close all channels: at the end of the stream, or when the
+  // input is interrupted (own transmission). Processing may continue after.
   void finish();
+  // The radio was tuned: flush all channels, forget the signal history and
+  // report frequencies relative to the new dial / centre frequency.
+  void retune(double centerHz, bool lsb);
 
   std::vector<ChannelInfo> channels() const;
   double streamTime() const;
@@ -107,6 +112,9 @@ class Engine {
   void emitLine(Channel& ch);
   void closeChannel(Channel& ch);
   ChannelInfo info(const Channel& ch) const;
+  bool isOwnCall(const std::string& call) const;
+  // Frames of history that belong to the current tuning.
+  int64_t age() const { return frame_ - epoch_ + 1; }
   double offsetOfBin(double k) const;
   int binOfOffset(double hz) const;
   double interpolatedOffset(int a) const;
@@ -160,6 +168,7 @@ class Engine {
   std::map<std::string, std::pair<double, double>> lastSpot_;  // call -> (time, rf)
   std::vector<cfloat> scratch_, chunk_;
   int64_t frame_ = -1;
+  int64_t epoch_ = 0;              // first frame after the last retune
   int nextId_ = 1;
   bool noiseReady_ = false;
 };

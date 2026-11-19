@@ -1,5 +1,7 @@
 #include "sources.hpp"
 
+#include "hpsdr.hpp"
+
 #include <sndfile.h>
 
 #include <cstdio>
@@ -169,7 +171,7 @@ class SoapySource : public Source {
     if (!dev_) { err = std::string("SoapySDR: ") + SoapySDRDevice_lastError(); return; }
     SoapySDRDevice_setSampleRate(dev_, SOAPY_SDR_RX, 0, o_.rate);
     SoapySDRDevice_setFrequency(dev_, SOAPY_SDR_RX, 0, o_.freq, nullptr);
-    if (o_.gain < 0) SoapySDRDevice_setGainMode(dev_, SOAPY_SDR_RX, 0, true);
+    if (!o_.gainSet) SoapySDRDevice_setGainMode(dev_, SOAPY_SDR_RX, 0, true);
     else SoapySDRDevice_setGain(dev_, SOAPY_SDR_RX, 0, o_.gain);
     o_.rate = SoapySDRDevice_getSampleRate(dev_, SOAPY_SDR_RX, 0);
     stream_ = SoapySDRDevice_setupStream(dev_, SOAPY_SDR_RX, SOAPY_SDR_CF32, nullptr, 0, nullptr);
@@ -237,6 +239,7 @@ std::unique_ptr<Source> openSource(const SourceOptions& o, std::string& err) {
     return nullptr;
 #endif
   }
+  if (s == "hpsdr" || s.rfind("hpsdr:", 0) == 0) return openHpsdr(o, s.size() > 6 ? s.substr(6) : std::string(), err);
   if (s == "soapy" || s.rfind("soapy:", 0) == 0) {
 #ifdef CWSWEEP_HAVE_SOAPY
     return make<SoapySource>(err, o, s.size() > 6 ? s.substr(6) : std::string());

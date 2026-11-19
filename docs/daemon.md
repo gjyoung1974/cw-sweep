@@ -41,12 +41,16 @@ centre frequency):
 
 ```sh
 cwsweep --call N0CALL --telnet 7300 --freq 14.06M --rate 192k soapy:driver=rtlsdr,direct_samp=2
+cwsweep --call N0CALL --telnet 7300 --band 40m hpsdr      # Hermes Lite 2 / Radioberry
 ```
+
+Give your real callsign to `--call`: it names the spotter, and it is never
+spotted itself, which matters when the receiver hears your own transmitter.
 
 ## 2a. System service: SDR, pipe or file input
 
-Use this when the input is a SoapySDR device, a raw pipe or a file. It starts
-at boot, with no login needed.
+Use this when the input is a SoapySDR device, a Hermes Lite 2 or Radioberry
+(`hpsdr`), a raw pipe or a file. It starts at boot, with no login needed.
 
 ```sh
 sudo useradd --system --home-dir /var/lib/cwsweep --shell /usr/sbin/nologin cwsweep
@@ -57,7 +61,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now cwsweep
 ```
 
-The `cwsweep` user needs access to the SDR's USB device. Either:
+A Hermes Lite 2 or Radioberry is reached over the network (`--band 40m
+hpsdr`), so it needs no device permissions. The unit must start after the
+network is up; if the radio is found only some of the time at boot, give its
+address (`hpsdr:192.168.1.50`) instead of relying on the discovery broadcast.
+
+For a USB SDR, the `cwsweep` user needs access to the device. Either:
 
 - install the udev rules that ship with your SDR's driver package; or
 - uncomment `SupplementaryGroups=` in the unit with the right group
@@ -95,6 +104,20 @@ sudo loginctl enable-linger "$USER"     # keep user services running without a l
 
 Use `systemctl --user` and `journalctl --user` for the commands in the rest
 of this document.
+
+With a fixed `--freq`, spots are wrong as soon as the radio is tuned. If the
+radio (or the SDR program driving it) is reachable through Hamlib's
+`rigctld`, add `--rigctl` and drop `--freq`:
+
+```sh
+CWSWEEP_ARGS=--call N0CALL --telnet 7300 --no-text --rigctl localhost pulse:alsa_input.usb-...
+```
+
+cwsweep then follows the dial frequency and mode, and stops decoding while
+the radio transmits. It keeps running, and reconnects, if `rigctld` isn't up
+yet or goes away. Until the first answer, text is shown with audio offsets
+and no spots are made. For a radio in CW mode, set
+`--pitch` to its sidetone pitch (600 Hz is assumed).
 
 ## 3. Check that it works
 
@@ -209,6 +232,15 @@ Troubleshooting:
   name, or the telnet port already in use.
 - **`PulseAudio: Connection refused` from the system service.** Sound-card
   input needs the user service (2b).
+- **`hpsdr: ... is in use by another program`.** Only one program can use an
+  openHPSDR radio. Close the SDR program, or run cwsweep on its audio with
+  `--rigctl` instead.
+- **`hpsdr: ADC overload`** in the log. Lower `--gain`.
+- **`rigctld at ...: cannot connect; retrying`.** `rigctld` isn't running, or
+  listens on another port (`--rigctl HOST:PORT`, default 4532).
+- **Spots a few hundred Hz off with `--rigctl`, radio in CW mode.** Set
+  `--pitch` to the radio's sidetone pitch. If they are on the wrong side of
+  the dial, add `--lsb`.
 - **Spots on the wrong frequency.** `--freq` must be the radio's dial
   frequency (audio input) or the SDR's centre frequency (I/Q). Add `--lsb` if
   the radio is in LSB or CW-reverse mode.

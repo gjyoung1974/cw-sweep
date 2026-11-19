@@ -41,6 +41,8 @@ target_link_libraries(cwcore PUBLIC PkgConfig::FFTW3F Threads::Threads)
 add_executable(cwsweep
   app/main.cpp
   app/sources.cpp
+  app/hpsdr.cpp
+  app/rigctl.cpp
   app/telnet.cpp
 )
 target_link_libraries(cwsweep PRIVATE cwcore PkgConfig::SNDFILE)
@@ -72,6 +74,16 @@ enable_testing()
 add_executable(cwtests tests/tests.cpp)
 target_link_libraries(cwtests PRIVATE cwcore)
 add_test(NAME cwtests COMMAND cwtests)
+
+# The hpsdr source against a stand-in radio on the loopback interface.
+find_package(Python3 COMPONENTS Interpreter)
+if(Python3_FOUND)
+  add_test(NAME hpsdr COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/hpsdr_test.py
+           $<TARGET_FILE:cwsweep> $<TARGET_FILE:cwgen> ${CMAKE_BINARY_DIR}/hpsdr_test)
+  # --rigctl against a stand-in rigctld; plays 45 s of audio in real time.
+  add_test(NAME rigctl COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/rigctl_test.py
+           $<TARGET_FILE:cwsweep> $<TARGET_FILE:cwgen> ${CMAKE_BINARY_DIR}/rigctl_test)
+endif()
 
 install(TARGETS cwsweep cwgen cwbench RUNTIME DESTINATION bin)
 install(PROGRAMS contrib/cwsweep-forward DESTINATION bin)
