@@ -211,6 +211,8 @@ Live channel table instead of scrolling text: `--tui`.
 | `--lm W` | language-model weight; 0 disables (default 0.4) |
 | `--call CALL` | your callsign: names the spotter (`CALL-#`, like the RBN) and is never spotted itself |
 | `--telnet PORT` | DX-cluster telnet server |
+| `--pskreporter` | upload spots to [PSK Reporter](https://pskreporter.info), batched every five minutes; needs `--call` and `--grid` |
+| `--grid LOCATOR`, `--antenna TEXT` | your Maidenhead locator (`FN42` or `FN42hn`) and antenna, for PSK Reporter |
 | `--scp FILE` | known-calls list (`MASTER.SCP`) for single-copy spotting |
 | `--respot SEC` | minimum time before re-spotting a call near the same frequency (600) |
 | `--tui`, `--no-text`, `--no-spots`, `--min-snr DB` | output selection |

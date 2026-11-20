@@ -44,8 +44,10 @@ add_executable(cwsweep
   app/hpsdr.cpp
   app/rigctl.cpp
   app/telnet.cpp
+  app/pskreporter.cpp
 )
 target_link_libraries(cwsweep PRIVATE cwcore PkgConfig::SNDFILE)
+target_compile_definitions(cwsweep PRIVATE CWSWEEP_VERSION="${PROJECT_VERSION}")
 
 if(CWSWEEP_PULSE)
   pkg_check_modules(PULSE IMPORTED_TARGET libpulse-simple)
@@ -83,6 +85,9 @@ if(Python3_FOUND)
   # --rigctl against a stand-in rigctld; plays 45 s of audio in real time.
   add_test(NAME rigctl COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/rigctl_test.py
            $<TARGET_FILE:cwsweep> $<TARGET_FILE:cwgen> ${CMAKE_BINARY_DIR}/rigctl_test)
+  # --pskreporter against a stand-in server on the loopback interface.
+  add_test(NAME pskreporter COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/pskreporter_test.py
+           $<TARGET_FILE:cwsweep> $<TARGET_FILE:cwgen> ${CMAKE_BINARY_DIR}/pskreporter_test)
 endif()
 
 install(TARGETS cwsweep cwgen cwbench RUNTIME DESTINATION bin)

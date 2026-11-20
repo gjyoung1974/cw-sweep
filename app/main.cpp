@@ -19,6 +19,7 @@
 #include "callsign.hpp"
 #include "engine.hpp"
 #include "hpsdr.hpp"
+#include "pskreporter.hpp"
 #include "rigctl.hpp"
 #include "sources.hpp"
 #include "telnet.hpp"
@@ -74,6 +75,14 @@ Decoder
 Output
   --call CALL           your callsign: names the spotter, and is never spotted itself
   --telnet PORT         run a DX-cluster telnet server (e.g. 7300)
+  --pskreporter         upload spots to PSK Reporter (pskreporter.info), in one
+                        batch every five minutes; needs --call and --grid
+  --grid LOCATOR        your Maidenhead locator, e.g. FN42 or FN42hn
+  --antenna TEXT        antenna description shown on the PSK Reporter map
+  --pskreporter-host HOST[:PORT]
+                        send the reports elsewhere (report.pskreporter.info:4739)
+  --pskreporter-interval SEC
+                        seconds between uploads (300, the least PSK Reporter allows)
   --tui                 live channel table instead of scrolling text
   --no-text             only print spots
   --no-spots            only print decoded text
@@ -191,6 +200,8 @@ int main(int argc, char** argv) {
   bool fminSet = false, fmaxSet = false, tui = false, showText = true, showSpots = true;
   bool realtime = false, color = isatty(STDOUT_FILENO), allText = false;
   int telnetPort = 0;
+  bool pskEnabled = false;
+  cwapp::PskReporterOptions pskOpt;
   double minSnr = -100;
   std::string record, call = "N0CALL", scpPath, rigTarget;
   double segLo = 0, segHi = 0, pitch = 0;
@@ -240,6 +251,11 @@ int main(int argc, char** argv) {
       else if (a == "--lm") cfg.lmWeight = std::stod(next());
       else if (a == "--call") call = next();
       else if (a == "--telnet") telnetPort = std::stoi(next());
+      else if (a == "--pskreporter") pskEnabled = true;
+      else if (a == "--grid") pskOpt.locator = next();
+      else if (a == "--antenna") pskOpt.antenna = next();
+      else if (a == "--pskreporter-host") { cwapp::parseHostPort(next(), pskOpt.host, pskOpt.port); pskEnabled = true; }
+      else if (a == "--pskreporter-interval") pskOpt.intervalSec = std::stod(next());
       else if (a == "--tui") tui = true;
       else if (a == "--no-text") showText = false;
       else if (a == "--no-spots") showSpots = false;
@@ -335,6 +351,22 @@ int main(int argc, char** argv) {
     if (!telnet->start(telnetPort, err)) { std::fprintf(stderr, "cwsweep: %s\n", err.c_str()); return 1; }
   }
 
+  std::unique_ptr<cwapp::PskReporter> psk;
+  if (pskEnabled) {
+    const bool official = pskOpt.host.find("pskreporter.info") != std::string::npos;
+    const char* why = nullptr;
+    if (call == "N0CALL") why = "needs your callsign (--call)";
+    else if (!cwapp::normaliseLocator(pskOpt.locator)) why = "needs your locator, e.g. --grid FN42 or --grid FN42hn";
+    else if (!haveRf && !rig) why = "needs the radio's frequency (--freq, --band or --rigctl)";
+    else if (official && !src->live()) why = "is for live reception, not recordings";
+    else if (pskOpt.intervalSec < (official ? 300 : 1)) why = "accepts uploads no more often than every 300 seconds";
+    if (why) { std::fprintf(stderr, "cwsweep: --pskreporter %s\n", why); return 2; }
+    pskOpt.call = call;
+    pskOpt.software = "cwsweep " CWSWEEP_VERSION;
+    psk = std::make_unique<cwapp::PskReporter>(pskOpt);
+    psk->start();
+  }
+
   std::signal(SIGINT, onSignal);
   std::signal(SIGTERM, onSignal);
   std::signal(SIGPIPE, SIG_IGN);
@@ -361,6 +393,7 @@ int main(int argc, char** argv) {
     if (rig && !haveRf) return;  // the radio's frequency isn't known yet
     std::string line = s.format();
     if (telnet) telnet->broadcast(line);
+    if (psk && haveRf) psk->add(s.call, s.rfHz, s.snrDb);
     if (tui) view.addSpot(line);
     else if (showSpots) {
       std::printf("%s%s%s\n", green, line.c_str(), reset);
@@ -425,5 +458,6 @@ int main(int argc, char** argv) {
   eng.finish();
   if (std::string h = src->health(); !h.empty()) std::fprintf(stderr, "cwsweep: %s\n", h.c_str());
   if (telnet) telnet->stop();
+  if (psk) psk->stop();
   return 0;
 }

@@ -205,6 +205,33 @@ Without the telnet server, spots can also be piped straight in:
 cwsweep --no-text --freq 7.025M band.wav | cwsweep-forward --stdin --jsonl spots.jsonl
 ```
 
+### PSK Reporter
+
+cwsweep uploads to [PSK Reporter](https://pskreporter.info) itself; no relay
+is needed. Add to `CWSWEEP_ARGS`:
+
+```sh
+--pskreporter --call N0CALL --grid FN42hn --antenna "40m dipole"
+```
+
+`--call` and `--grid` (a 4- or 6-character Maidenhead locator) are required;
+`--antenna` is optional and shows on the map. The radio's frequency must be
+known (`--freq`, `--band` or `--rigctl`), and the input must be live:
+recordings aren't uploaded.
+
+Spots are sent as mode `CW` with their frequency and signal-to-noise ratio,
+in one UDP datagram every five minutes, which is the rate PSK Reporter asks
+for. A call is reported at most once per band in five minutes. The first
+upload is logged (`pskreporter: reporting to ...`); your station appears on
+the map as a monitor a few minutes later. UDP gives no confirmation, so the
+map is the only proof that reports arrive.
+
+As with any automatic spotter, wrong calls end up on a map other operators
+rely on. `--scp` with a current `MASTER.SCP` keeps them rare.
+
+`--pskreporter-host HOST[:PORT]` sends the reports somewhere else, for
+testing; `--pskreporter-interval SEC` then sets the upload interval.
+
 ### The Reverse Beacon Network
 
 The RBN collects spots through its *Aggregator* program (Windows; it can run
