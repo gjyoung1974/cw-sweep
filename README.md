@@ -99,7 +99,7 @@ sudo apt install cmake g++ libfftw3-dev libsndfile1-dev libpulse-dev libsoapysdr
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ctest --test-dir build            # unit + end-to-end tests (about a minute)
-sudo cmake --install build        # optional: cwsweep, cwgen, cwbench -> /usr/local/bin
+sudo cmake --install build        # optional: cwsweep, cwsend, cwgen, cwbench -> /usr/local/bin
 ```
 
 The openHPSDR (Hermes Lite 2, Radioberry) source and the `rigctld` follower
@@ -223,6 +223,41 @@ Connecting a logger: point N1MM+, DXLog, CC-User, etc. at a telnet cluster on
 `<host>:7300`, or try it by hand with `telnet localhost 7300`. Send any
 callsign at the login prompt.
 
+### Sending CW: cwsend
+
+`cwsend` is a separate program that sends CW through a Radioberry, Hermes
+Lite 2 or other openHPSDR protocol 1 radio. Give it text and it sends that
+and exits; give it none and it sends every line it reads from standard input:
+
+```sh
+cwsend --freq 7030k --wpm 22 cq cq de n0call n0call k
+cwsend --freq 7030k --radio 192.168.1.50        # then type:
+cq cq de n0call n0call k                        # sent on 7030 kHz
+/wpm 28                                         # change the speed
+/freq 7032.5k                                   # change the transmit frequency
+/stop                                           # stop sending, forget what is queued
+```
+
+| Option | |
+|---|---|
+| `--freq F` | transmit frequency (required) |
+| `--wpm N` | speed, 5–60 (default 20) |
+| `--drive N` | the radio's drive level, 0–255 (default 255, full power) |
+| `--radio ADDRESS[:PORT]` | the radio; found by broadcast if not given |
+| `--discover` | list the openHPSDR radios on the network |
+
+`<AR>`, `<BT>`, `<KN>`, `<SK>` and `<AS>` are sent as prosigns; characters with
+no Morse code are left out. Lines typed while one is being sent are queued,
+and at the end of the input (Ctrl-D) cwsend finishes what is queued and exits.
+The carrier is exactly on the transmit frequency, keyed with 5 ms
+raised-cosine edges; the transmitter is switched on 30 ms before the first
+element and released 300 ms after the last. No band filters are selected:
+low-pass filtering after the radio is yours to arrange, and you need a
+licence for the frequency.
+
+Only one program can use the radio at a time, so cwsend can't run while
+`cwsweep ... hpsdr` or an SDR program has it.
+
 ### Running as a service and uploading spots
 
 [docs/daemon.md](docs/daemon.md) covers:
@@ -306,7 +341,7 @@ src/core/   DSP and decoding library (no I/O)
   engine      channel detection and management, glue
   synth       synthetic signal generator
 app/        cwsweep CLI: sources (sndfile/raw/PulseAudio/SoapySDR/openHPSDR),
-            rigctld follower, telnet server
+            rigctld follower, telnet server; cwsend CLI
 contrib/    cwsweep-forward spot relay, systemd units and example settings
 docs/       daemon.md: running as a service, uploading spots
 tools/      cwgen, cwbench
@@ -324,7 +359,11 @@ Planned work is tracked in [TODOs.md](TODOs.md).
 * The openHPSDR source has been tested against a protocol emulator
   (`tests/fake_hpsdr.py`), written from the protocol documents and the Hermes
   Lite 2 gateware, but not yet on a real radio. If the spectrum comes out
-  mirrored, use `--swap-iq`.
+  mirrored, use `--swap-iq`. The same goes for `cwsend`: try it first into a
+  dummy load at a low `--drive`.
+* `cwsend` sends typed text only: no paddle or key input, no sidetone, and no
+  filter-board (N2ADR, Alex) band switching. It can't share the radio with
+  cwsweep, so there is no receiving while it runs.
 * One receiver, one band per process. A Hermes Lite 2 can stream several
   receivers at once; using them for several bands is not implemented.
 * An openHPSDR radio can't be shared with an SDR program (Thetis, SparkSDR,

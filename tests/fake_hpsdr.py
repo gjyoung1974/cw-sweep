@@ -5,7 +5,9 @@ cwsweep's hpsdr source without hardware.
 Answers discovery, and after a start packet streams a 2-channel I/Q WAV file
 as receiver 1. Every command packet the host sends is checked: when the host
 stops (or the file ends) a JSON summary is printed, including whether any
-packet would have keyed a transmitter.
+packet would have keyed a transmitter, and the keying of whatever was
+transmitted: the I samples of the frames sent with MOX set, as runs of
+key-down and key-up.
 
   fake_hpsdr.py --port 10240 --speed 4 band_iq.wav
 
@@ -73,7 +75,8 @@ def main():
     print("READY", flush=True)
     info = {"discoveries": 0, "starts": 0, "commands": 0, "bad": [], "mox": 0, "nonzero_payload": 0,
             "addresses": {}, "rate": None, "duplex": None, "receivers": None, "stopped": False,
-            "wav_rate": wav_rate}
+            "wav_rate": wav_rate, "payload_without_mox": 0, "tx_other_nonzero": 0, "mox_last": False}
+    tx_i = []
 
     def reply_discovery(addr):
         r = bytearray(60)
@@ -107,10 +110,20 @@ def main():
                     info["bad"].append("sync")
                     continue
                 c0, data = f[3], f[4:8]
-                if c0 & 1:
+                mox = bool(c0 & 1)
+                c0 &= 0xFE
+                info["mox_last"] = mox
+                if mox:
                     info["mox"] += 1
+                    # Per sample: left, right, I, Q, 16 bits each.
+                    v = struct.unpack(">252h", f[8:])
+                    tx_i.extend(v[2::4])
+                    if any(v[0::4]) or any(v[1::4]) or any(v[3::4]):
+                        info["tx_other_nonzero"] += 1
                 if any(f[8:]):
                     info["nonzero_payload"] += 1
+                    if not mox:
+                        info["payload_without_mox"] += 1
                 info["addresses"]["%#04x" % c0] = data.hex()
                 if c0 == 0x00:
                     info["rate"] = RATES[data[0] & 3]
@@ -162,6 +175,17 @@ def main():
             p, addr = s.recvfrom(2048)
             handle(p, addr)
     info["sent_packets"] = seq
+    # The keying: [key down?, samples] runs, split at half the peak.
+    info["tx_peak"] = max(tx_i, default=0)
+    info["tx_min"] = min(tx_i, default=0)
+    runs = []
+    for v in tx_i:
+        on = 2 * v > info["tx_peak"] > 0
+        if runs and runs[-1][0] == on:
+            runs[-1][1] += 1
+        else:
+            runs.append([on, 1])
+    info["tx_runs"] = runs
     print(json.dumps(info))
 
 

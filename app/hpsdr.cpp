@@ -17,7 +17,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <vector>
+
+#include "morse.hpp"
 
 // openHPSDR protocol 1 ("Metis"), UDP port 1024.
 //
@@ -31,16 +34,32 @@
 //     host -> radio (endpoint 2): C0 = address << 1 | MOX, C1..C4 = value;
 //               the payload is transmit audio and I/Q.
 //
-// This client only receives. Every command byte it sends has MOX clear, the
-// drive level is zero, the power amplifier is off and the payload is zero, so
-// it cannot key the transmitter.
+//               Per transmit sample (always 48 kHz): 16-bit big-endian left
+//               and right audio, then I and Q.
+//
+// Opened as a source (cwsweep) this client only receives. Every command byte
+// it sends has MOX clear, the drive level is zero, the power amplifier is off
+// and the payload is zero, so it cannot key the transmitter.
+//
+// Opened as a sender (cwsend) it can send CW. The carrier is made here: I carries the keyed
+// envelope (raised-cosine edges) and Q is zero, so the signal is on the
+// transmit frequency itself. MOX is set shortly before the first element and
+// held for a hang time after the last one. The radio consumes exactly 48,000
+// transmit samples per second of its own clock, so packets are paced by the
+// received ones: 126 transmit samples for every 126 * rate / 48000 received.
 
 namespace cwapp {
 namespace {
 
 constexpr int kPort = 1024;
 constexpr size_t kPacket = 1032;
-constexpr int kSetsPerFrame = 63;  // one receiver: 504 / (6 + 2)
+constexpr int kSetsPerFrame = 63;  // one receiver: 504 / (6 + 2); also transmit sets per frame
+constexpr double kTxRate = 48000;
+constexpr int kTxLead = 1440;      // samples of MOX before the first element (30 ms: T/R switching)
+constexpr int kTxHang = 14400;     // samples of MOX after the last element (300 ms)
+constexpr int kTxGuard = 7200;     // received samples still dropped after MOX is released (150 ms)
+constexpr float kTxRise = 240;     // samples per keying edge (5 ms)
+constexpr float kTxPeak = 30000;   // of 32767
 
 struct Radio {
   sockaddr_in addr{};
@@ -137,9 +156,11 @@ std::vector<Radio> discover(const sockaddr_in* to, int waitMs) {
   return found;
 }
 
-class HpsdrSource : public Source {
+class HpsdrSource : public HpsdrSender {
  public:
-  HpsdrSource(const SourceOptions& o, const std::string& target, std::string& err) : o_(o) {
+  HpsdrSource(const SourceOptions& o, const std::string& target, const HpsdrTx* tx, std::string& err) : o_(o) {
+    tx_ = tx != nullptr;
+    if (tx) txo_ = *tx;
     if (o_.rate <= 0) o_.rate = 192000;
     if (o_.rate == 48000) rateCode_ = 0;
     else if (o_.rate == 96000) rateCode_ = 1;
@@ -148,6 +169,9 @@ class HpsdrSource : public Source {
     else { err = "hpsdr: --rate must be 48k, 96k, 192k or 384k"; return; }
     if (o_.freq <= 0) { err = "hpsdr: needs --band, --segment or --freq"; return; }
     if (o_.freq >= 4294967296.0) { err = "hpsdr: --freq is out of range"; return; }
+    if (tx_ && !(txo_.freq > 0 && txo_.freq < 4294967296.0)) { err = "hpsdr: the transmit frequency is out of range"; return; }
+    if (tx_ && (txo_.drive < 0 || txo_.drive > 255)) { err = "hpsdr: the drive level must be 0..255"; return; }
+    if (tx_ && !setSendSpeed(txo_.wpm)) { err = "hpsdr: the speed must be 5..60 WPM"; return; }
 
     std::vector<Radio> found;
     if (target.empty()) {
@@ -196,11 +220,10 @@ class HpsdrSource : public Source {
     }
 
     // Settings, sent round-robin in the second frame of every packet.
-    const uint32_t f = static_cast<uint32_t>(std::llround(o_.freq));
-    auto freq = [f](uint8_t c0) { return Cc{c0, uint8_t(f >> 24), uint8_t(f >> 16), uint8_t(f >> 8), uint8_t(f)}; };
-    settings_.push_back(freq(0x04));                 // receiver 1 frequency, Hz
-    settings_.push_back(freq(0x02));                 // transmit frequency (never used)
-    settings_.push_back(Cc{0x12, 0, 0x04, 0, 0});    // drive 0, PA off, T/R relay left in receive
+    settings_.push_back(freqCc(0x04, o_.freq));      // receiver 1 frequency, Hz
+    settings_.push_back(freqCc(0x02, tx_ ? txo_.freq : o_.freq));  // transmit frequency (kTxFreqSetting)
+    if (tx_) settings_.push_back(Cc{0x12, uint8_t(txo_.drive), 0x08, 0, 0});  // drive level, PA on
+    else settings_.push_back(Cc{0x12, 0, 0x04, 0, 0});  // drive 0, PA off, T/R relay left in receive
     if (radio_.board == 6) {                         // Hermes Lite: LNA gain -12..+48 dB
       gainDb_ = std::clamp(o_.gainSet ? static_cast<int>(std::lround(o_.gain)) : 20, -12, 48);
       settings_.push_back(Cc{0x14, 0, 0, 0, uint8_t(0x40 | (gainDb_ + 12))});
@@ -228,6 +251,11 @@ class HpsdrSource : public Source {
   ~HpsdrSource() override {
     if (fd_ < 0) return;
     if (started_) {
+      // Whatever was being sent: key up and release MOX before stopping.
+      runs_.clear();
+      tail_ = 0;
+      level_ = 0;
+      for (int i = 0; tx_ && i < 3; ++i) sendCommand();
       uint8_t stop[64] = {0xEF, 0xFE, 0x04, 0x00};
       for (int i = 0; i < 2; ++i) ::send(fd_, stop, sizeof stop, 0);
     }
@@ -243,8 +271,53 @@ class HpsdrSource : public Source {
     char b[240];
     int n = std::snprintf(b, sizeof b, "%s @ %.1f kHz, %.0f kS/s", describeRadio(radio_).c_str(), o_.freq / 1e3,
                           o_.rate / 1e3);
-    if (radio_.board == 6) std::snprintf(b + n, sizeof b - static_cast<size_t>(n), ", LNA %+d dB", gainDb_);
+    if (radio_.board == 6) n += std::snprintf(b + n, sizeof b - static_cast<size_t>(n), ", LNA %+d dB", gainDb_);
+    if (tx_) std::snprintf(b + n, sizeof b - static_cast<size_t>(n), ", transmit on %.2f kHz", txo_.freq / 1e3);
     return b;
+  }
+
+  // From MOX going on until the receiver has settled after it went off.
+  bool transmitting() const override { return !runs_.empty() || tail_ > 0; }
+  double sendFreq() const override { return txo_.freq; }
+  double sendSpeed() const override { return wpm_; }
+
+  std::string send(const std::string& text) override {
+    std::string t = cw::normalizeText(text);
+    if (!tx_ || t.empty()) return {};
+    const int dit = static_cast<int>(std::lround(kTxRate * 1.2 / wpm_));
+    if (runs_.empty() && tail_ <= kTxGuard) runs_.push_back({false, kTxLead});
+    for (char c : t) {
+      if (c == ' ') {
+        runs_.back().n += 4 * dit;  // 3 after the character + 4 = 7
+        continue;
+      }
+      for (char e : cw::codeFor(c)) {
+        runs_.push_back({true, e == '-' ? 3 * dit : dit});
+        runs_.push_back({false, dit});
+      }
+      runs_.back().n += 2 * dit;
+    }
+    runs_.back().n += 4 * dit;  // whatever is sent next is a new word
+    return t;
+  }
+
+  void stopSending() override {
+    if (runs_.empty()) return;
+    runs_.clear();
+    tail_ = kTxHang + kTxGuard;  // the envelope ramps down under MOX
+  }
+
+  bool setSendSpeed(double wpm) override {
+    if (!(wpm >= 5 && wpm <= 60)) return false;
+    wpm_ = wpm;
+    return true;
+  }
+
+  bool setSendFreq(double hz) override {
+    if (!tx_ || !(hz > 0 && hz < 4294967296.0)) return false;
+    txo_.freq = hz;
+    settings_[kTxFreqSetting] = freqCc(0x02, hz);
+    return true;
   }
 
   std::string health() override {
@@ -277,7 +350,8 @@ class HpsdrSource : public Source {
       uint32_t seq = uint32_t(buf[4]) << 24 | uint32_t(buf[5]) << 16 | uint32_t(buf[6]) << 8 | buf[7];
       // A lower number than expected is a restart or the counter wrapping
       // (the Hermes Lite counts 20 bits), not a loss.
-      if (haveSeq_ && seq > nextSeq_) lost_ += seq - nextSeq_;
+      const uint32_t gap = haveSeq_ && seq > nextSeq_ ? seq - nextSeq_ : 0;
+      lost_ += gap;
       nextSeq_ = seq + 1;
       haveSeq_ = true;
 
@@ -295,7 +369,11 @@ class HpsdrSource : public Source {
           out.push_back(o_.swapIq ? cfloat(q, i) : cfloat(i, q));
         }
       }
-      if (++sinceSend_ >= sendEvery_) {
+      if (tx_) {
+        // Transmit samples for the time this packet covers (and any lost before it).
+        txOwed_ += (1.0 + std::min<uint32_t>(gap, 50)) * (2 * kSetsPerFrame) * kTxRate / o_.rate;
+        for (; txOwed_ >= 2 * kSetsPerFrame; txOwed_ -= 2 * kSetsPerFrame) sendCommand();
+      } else if (++sinceSend_ >= sendEvery_) {
         sinceSend_ = 0;
         sendCommand();
       }
@@ -305,6 +383,28 @@ class HpsdrSource : public Source {
 
  private:
   using Cc = std::array<uint8_t, 5>;
+  struct Run { bool on; int n; };  // key down or up for n transmit samples
+  static constexpr size_t kTxFreqSetting = 1;
+
+  static Cc freqCc(uint8_t c0, double hz) {
+    const uint32_t f = static_cast<uint32_t>(std::llround(hz));
+    return Cc{c0, uint8_t(f >> 24), uint8_t(f >> 16), uint8_t(f >> 8), uint8_t(f)};
+  }
+
+  // The next sample of the keyed envelope, 0..1.
+  float nextEnvelope() {
+    bool key = false;
+    if (!runs_.empty()) {
+      Run& r = runs_.front();
+      key = r.on;
+      if (--r.n <= 0) runs_.pop_front();
+      if (runs_.empty()) tail_ = kTxHang + kTxGuard;
+    } else if (tail_ > 0) {
+      --tail_;
+    }
+    level_ = key ? std::min(1.0f, level_ + 1 / kTxRise) : std::max(0.0f, level_ - 1 / kTxRise);
+    return 0.5f - 0.5f * std::cos(3.14159265f * level_);
+  }
 
   void sendCommand() {
     uint8_t pkt[kPacket] = {0xEF, 0xFE, 0x01, 0x02};
@@ -323,6 +423,18 @@ class HpsdrSource : public Source {
       uint8_t* p = pkt + 8 + 512 * fr;
       p[0] = p[1] = p[2] = 0x7F;
       std::copy(cc[fr]->begin(), cc[fr]->end(), p + 3);
+      const bool mox = !runs_.empty() || tail_ > kTxGuard;
+      if (mox) {
+        p[3] |= 0x01;
+        for (uint8_t* q = p + 8; q < p + 512; q += 8) {
+          const int16_t v = static_cast<int16_t>(std::lround(kTxPeak * nextEnvelope()));
+          q[4] = uint8_t(v >> 8);
+          q[5] = uint8_t(v);
+        }
+      } else {
+        tail_ = std::max(0, tail_ - kSetsPerFrame);
+        level_ = 0;
+      }
     }
     ::send(fd_, pkt, sizeof pkt, 0);
   }
@@ -338,12 +450,32 @@ class HpsdrSource : public Source {
   bool haveSeq_ = false;
   int sendEvery_ = 1, sinceSend_ = 0;
   unsigned long lost_ = 0, overload_ = 0;
+
+  bool tx_ = false;        // opened as a sender: may transmit
+  HpsdrTx txo_;
+  double wpm_ = 20;
+  std::deque<Run> runs_;   // keying still to be sent
+  int tail_ = 0;           // samples left of the hang time (above kTxGuard) and the guard time
+  float level_ = 0;        // position on the keying edge, 0..1
+  double txOwed_ = 0;      // transmit samples due, from the received sample count
 };
 
 }  // namespace
 
 std::unique_ptr<Source> openHpsdr(const SourceOptions& o, const std::string& target, std::string& err) {
-  auto s = std::make_unique<HpsdrSource>(o, target, err);
+  auto s = std::make_unique<HpsdrSource>(o, target, nullptr, err);
+  if (!err.empty() || !s->good()) {
+    if (err.empty()) err = "hpsdr: cannot open the radio";
+    return nullptr;
+  }
+  return s;
+}
+
+std::unique_ptr<HpsdrSender> openHpsdrSender(const HpsdrTx& tx, const std::string& target, std::string& err) {
+  SourceOptions o;
+  o.rate = 48000;  // received samples are only the clock for the transmitted ones
+  o.freq = tx.freq;
+  auto s = std::make_unique<HpsdrSource>(o, target, &tx, err);
   if (!err.empty() || !s->good()) {
     if (err.empty()) err = "hpsdr: cannot open the radio";
     return nullptr;

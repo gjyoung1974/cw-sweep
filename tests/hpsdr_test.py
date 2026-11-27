@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end test of cwsweep's hpsdr source against tests/fake_hpsdr.py.
 
-  hpsdr_test.py CWSWEEP CWGEN WORKDIR
+  hpsdr_test.py CWSWEEP CWGEN WORKDIR CWSEND
 """
 
 import json
@@ -9,7 +9,7 @@ import os
 import subprocess
 import sys
 
-cwsweep, cwgen, work = sys.argv[1:4]
+cwsweep, cwgen, work, cwsend = sys.argv[1:5]
 here = os.path.dirname(os.path.abspath(__file__))
 os.makedirs(work, exist_ok=True)
 wav = os.path.join(work, "hpsdr_iq.wav")
@@ -23,12 +23,14 @@ def check(cond, what):
         print("FAILED:", what)
 
 
-def run(port, fake_args, sweep_args):
+def run(port, fake_args, sweep_args, typed=None, send=False):
     fake = subprocess.Popen([sys.executable, os.path.join(here, "fake_hpsdr.py"), "--port", str(port)] +
                             fake_args + [wav], stdout=subprocess.PIPE, text=True)
     assert fake.stdout.readline().strip() == "READY"
-    p = subprocess.run([cwsweep, "--no-color"] + sweep_args + ["hpsdr:127.0.0.1:%d" % port],
-                       capture_output=True, text=True, timeout=60)
+    cmd = ([cwsend, "--radio", "127.0.0.1:%d" % port] + sweep_args if send else
+           [cwsweep, "--no-color"] + sweep_args + ["hpsdr:127.0.0.1:%d" % port])
+    p = subprocess.run(cmd,
+                       capture_output=True, text=True, timeout=60, input=typed)
     summary = json.loads(fake.communicate(timeout=30)[0])
     spots = {}
     for line in p.stdout.splitlines():
@@ -72,6 +74,55 @@ check(s["addresses"].get("0x14") == "00000049", "LNA gain -3 dB: %r" % s["addres
 p, spots, s = run(10313, ["--busy", "--timeout", "3"], ["--band", "40m"])
 check(p.returncode == 1 and "in use" in p.stderr, "busy radio refused: %s" % p.stderr)
 check(s["starts"] == 0 and s["commands"] == 0, "busy radio was sent commands: %r" % s)
+
+# 4. cwsend. What is typed comes out as keyed I samples under MOX, at the
+# speed asked for; the transmitter is released and cwsend exits afterwards.
+MORSE = {"C": "-.-.", "Q": "--.-", "D": "-..", "E": ".", "N": "-.", "0": "-----", "X": "-..-", "K": "-.-",
+         "+": ".-.-."}
+
+
+def keyed(runs, wpm):
+    """Dots and dashes from [key down?, samples at 48 kHz] runs; ' ' between characters, ' / ' between words."""
+    dit = 48000 * 1.2 / wpm
+    out = ""
+    for on, n in runs:
+        if on:
+            out += "." if n < 2 * dit else "-"
+        elif 2 * dit <= n < 5 * dit:
+            out += " "
+        elif n >= 5 * dit and out:
+            out += " / "
+    return out.rstrip(" /")
+
+
+text = "CQ DE N0XX <AR> K"
+want = " / ".join(" ".join(MORSE[c] for c in w) for w in text.replace("<AR>", "+").split())
+p, spots, s = run(10314, ["--speed", "4"], ["--freq", "7030k", "--wpm", "30", "--drive", "128"],
+                  typed="/wpm 32\n/bogus\n" + text.lower() + "\n", send=True)
+check(p.returncode == 0, "exit status %d: %s" % (p.returncode, p.stderr))
+check("sending on 7030.00 kHz at 32 WPM: CQ DE N0XX <AR> K" in p.stderr, "sending announced: %s" % p.stderr)
+check("commands are" in p.stderr, "unknown command reported: %s" % p.stderr)
+check(keyed(s["tx_runs"], 32) == want, "keying: %r, wanted %r" % (keyed(s["tx_runs"], 32), want))
+dits = [n for on, n in s["tx_runs"] if on and n < 2 * 1800]
+check(dits and all(abs(n - 1800) <= 2 for n in dits), "dit length at 32 WPM (1800 samples): %r" % dits)
+check(s["tx_peak"] == 30000 and s["tx_min"] == 0 and s["tx_other_nonzero"] == 0, "carrier on I only: %r %r %r" %
+      (s["tx_peak"], s["tx_min"], s["tx_other_nonzero"]))
+check(s["mox"] > 0 and not s["mox_last"], "MOX set while sending and released after: %r" % s["mox"])
+check(s["payload_without_mox"] == 0, "samples sent without MOX: %r" % s["payload_without_mox"])
+check(s["addresses"].get("0x02") == "%08x" % 7030000, "transmit frequency: %r" % s["addresses"])
+check(s["addresses"].get("0x12") == "80080000", "drive 128, PA on: %r" % s["addresses"])
+check(s["rate"] == 48000 and not s["bad"], "settings and packets: %r %r" % (s["rate"], s["bad"]))
+check(s["stopped"], "no stop packet at exit")
+
+# 5. Text on the command line: sent, then cwsend exits.
+p, spots, s = run(10315, ["--speed", "4"], ["--freq", "7030k", "--wpm", "40", "en", "k"], send=True)
+check(p.returncode == 0, "exit status %d: %s" % (p.returncode, p.stderr))
+check(keyed(s["tx_runs"], 40) == ". -. / -.-", "keying: %r" % keyed(s["tx_runs"], 40))
+check(s["addresses"].get("0x12") == "ff080000" and not s["mox_last"] and s["stopped"], "full drive, released: %r" % s)
+
+# 6. No frequency, no transmission.
+p = subprocess.run([cwsend, "cq"], capture_output=True, text=True)
+check(p.returncode == 2, "cwsend without --freq refused: %s" % p.stderr)
 
 print("hpsdr", "ok" if failures == 0 else "FAILED")
 sys.exit(1 if failures else 0)

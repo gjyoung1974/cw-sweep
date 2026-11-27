@@ -60,6 +60,9 @@ The `hpsdr` source has only been tested against `tests/fake_hpsdr.py`.
 - Confirm the spectrum isn't mirrored (otherwise swap I and Q by default).
 - Confirm the watchdog is kept fed at every sample rate, and that the radio
   stops cleanly when cwsweep exits.
+- Send CW with `cwsend` into a dummy load: check the frequency, the keying
+  shape and speed, the T/R timing (30 ms lead, 300 ms hang), and that the
+  transmitter is released when cwsend exits or is killed.
 - A Radioberry always reports itself idle, so the "in use by another
   program" check can't protect it; find another way to detect a running
   client, or document it.

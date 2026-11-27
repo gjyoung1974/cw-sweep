@@ -14,7 +14,15 @@ option(CWSWEEP_SOAPY "Enable direct SoapySDR input" ON)
 
 add_compile_options(-Wall -Wextra)
 if(CWSWEEP_NATIVE AND CMAKE_BUILD_TYPE STREQUAL "Release")
-  add_compile_options(-march=native)
+  # Not every target supports -march=native (e.g. GCC < 15 on RISC-V), so
+  # probe for it rather than failing the whole build.
+  include(CheckCXXCompilerFlag)
+  check_cxx_compiler_flag(-march=native CWSWEEP_HAS_MARCH_NATIVE)
+  if(CWSWEEP_HAS_MARCH_NATIVE)
+    add_compile_options(-march=native)
+  else()
+    message(STATUS "-march=native not supported by this compiler; building for the generic target")
+  endif()
 endif()
 
 find_package(PkgConfig REQUIRED)
@@ -49,6 +57,10 @@ add_executable(cwsweep
 target_link_libraries(cwsweep PRIVATE cwcore PkgConfig::SNDFILE)
 target_compile_definitions(cwsweep PRIVATE CWSWEEP_VERSION="${PROJECT_VERSION}")
 
+# ---- cwsend: CW through an openHPSDR radio -----------------------------------
+add_executable(cwsend app/cwsend.cpp app/hpsdr.cpp)
+target_link_libraries(cwsend PRIVATE cwcore)
+
 if(CWSWEEP_PULSE)
   pkg_check_modules(PULSE IMPORTED_TARGET libpulse-simple)
   if(PULSE_FOUND)
@@ -81,7 +93,8 @@ add_test(NAME cwtests COMMAND cwtests)
 find_package(Python3 COMPONENTS Interpreter)
 if(Python3_FOUND)
   add_test(NAME hpsdr COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/hpsdr_test.py
-           $<TARGET_FILE:cwsweep> $<TARGET_FILE:cwgen> ${CMAKE_BINARY_DIR}/hpsdr_test)
+           $<TARGET_FILE:cwsweep> $<TARGET_FILE:cwgen> ${CMAKE_BINARY_DIR}/hpsdr_test
+           $<TARGET_FILE:cwsend>)
   # --rigctl against a stand-in rigctld; plays 45 s of audio in real time.
   add_test(NAME rigctl COMMAND Python3::Interpreter ${CMAKE_SOURCE_DIR}/tests/rigctl_test.py
            $<TARGET_FILE:cwsweep> $<TARGET_FILE:cwgen> ${CMAKE_BINARY_DIR}/rigctl_test)
@@ -90,7 +103,7 @@ if(Python3_FOUND)
            $<TARGET_FILE:cwsweep> $<TARGET_FILE:cwgen> ${CMAKE_BINARY_DIR}/pskreporter_test)
 endif()
 
-install(TARGETS cwsweep cwgen cwbench RUNTIME DESTINATION bin)
+install(TARGETS cwsweep cwsend cwgen cwbench RUNTIME DESTINATION bin)
 install(PROGRAMS contrib/cwsweep-forward DESTINATION bin)
 install(DIRECTORY contrib/systemd DESTINATION share/cwsweep)
 install(FILES docs/daemon.md DESTINATION share/cwsweep)
